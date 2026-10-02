@@ -22,7 +22,7 @@ static String runQueryLocked(const String& wantFingerprint) {
   for (int i = 0; i < n; i++) {
     if (!MDNS.hasTxt(i, "fp")) continue; // not one of ours
     String fp   = MDNS.txt(i, "fp");
-    String ip   = MDNS.address(i).toString();
+    String ip   = MDNS.IP(i).toString();
     String name = MDNS.hasTxt(i, "name") ? MDNS.txt(i, "name") : ("Tealight-" + fp.substring(fp.length() - 4));
     registryNoteSeen(fp, ip, name);
     if (fp == wantFingerprint) found = ip;

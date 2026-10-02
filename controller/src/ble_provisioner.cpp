@@ -19,7 +19,8 @@ static bool gWantScan      = false;
 static bool gWantProvision = false;
 struct PendingProvision {
   String  address;
-  uint8_t addrType = 0;
+  uint8_t addrType;   // no default init: keeps this an aggregate for brace-init
+                      // below; the static gPending is zero-initialized anyway.
   String  ssid, pass, name;
 };
 static PendingProvision gPending;
