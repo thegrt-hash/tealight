@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tealights</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>🕯️ Tealights</h1>
+    <button id="addDeviceBtn" class="btn btn-primary">+ Add device</button>
+  </header>
+
+  <main id="grid" class="grid">
+    <p id="emptyState" class="empty-state" hidden>No tealights yet — click "+ Add device" to pair one over Bluetooth.</p>
+  </main>
+
+  <template id="cardTemplate">
+    <article class="card">
+      <header class="card-head">
+        <span class="status-dot"></span>
+        <h2 class="device-name"></h2>
+        <button class="icon-btn gear-btn" title="Details / rename / forget">⚙</button>
+      </header>
+      <div class="swatch"></div>
+      <div class="field">
+        <label>Effect</label>
+        <select class="mode-select"></select>
+      </div>
+      <div class="field">
+        <label>Color</label>
+        <input type="range" class="hue-slider" min="0" max="255" step="1">
+      </div>
+      <div class="field">
+        <label>Saturation</label>
+        <input type="range" class="sat-slider" min="0" max="255" step="1">
+      </div>
+      <div class="field">
+        <label>Speed</label>
+        <input type="range" class="speed-slider" min="0" max="255" step="1">
+      </div>
+      <div class="field">
+        <label>Intensity</label>
+        <input type="range" class="intensity-slider" min="0" max="255" step="1">
+      </div>
+      <div class="field">
+        <label>Brightness</label>
+        <input type="range" class="brightness-slider" min="0" max="255" step="1">
+      </div>
+      <footer class="card-foot">
+        <span class="meta-ip"></span>
+        <button class="btn btn-small identify-btn">Locate</button>
+      </footer>
+
+      <div class="details-panel" hidden>
+        <label class="rename-row">
+          Name
+          <input type="text" class="rename-input">
+          <button class="btn btn-small rename-save-btn">Save</button>
+        </label>
+        <dl class="meta-list">
+          <dt>Fingerprint</dt><dd class="meta-fp"></dd>
+          <dt>Last seen</dt><dd class="meta-lastseen"></dd>
+        </dl>
+        <button class="btn btn-small btn-danger forget-btn">Forget this device</button>
+      </div>
+    </article>
+  </template>
+
+  <div id="wizardOverlay" class="overlay" hidden>
+    <div class="modal">
+      <header class="modal-head">
+        <h2>Add a tealight</h2>
+        <button id="wizardClose" class="icon-btn">✕</button>
+      </header>
+
+      <section id="wizardScan" class="wizard-step">
+        <p>Put the new tealight in pairing mode (power it on fresh, or hold its button ~3s to reset), then scan.</p>
+        <button id="scanBtn" class="btn btn-primary">Scan for devices</button>
+        <p id="scanStatus" class="hint"></p>
+        <ul id="foundList" class="found-list"></ul>
+      </section>
+
+      <section id="wizardForm" class="wizard-step" hidden>
+        <p class="hint">Pairing: <strong id="formDeviceName"></strong></p>
+        <label>WiFi network (SSID)<input id="formSsid" type="text" autocomplete="off"></label>
+        <label>WiFi password<input id="formPass" type="password" autocomplete="off"></label>
+        <label>Friendly name<input id="formName" type="text" placeholder="e.g. Living Room"></label>
+        <div class="modal-actions">
+          <button id="formBack" class="btn">Back</button>
+          <button id="formSubmit" class="btn btn-primary">Connect</button>
+        </div>
+      </section>
+
+      <section id="wizardProgress" class="wizard-step" hidden>
+        <p id="progressStatus" class="hint"></p>
+        <div class="spinner" id="progressSpinner"></div>
+        <div class="modal-actions">
+          <button id="progressDone" class="btn btn-primary" hidden>Done</button>
+          <button id="progressRetry" class="btn" hidden>Try again</button>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

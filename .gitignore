@@ -1,0 +1,5 @@
+.pio/
+.vscode/
+*.bin
+*.elf
+controller/src/secrets.h
