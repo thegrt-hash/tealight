@@ -3,7 +3,7 @@
 #include "secrets.h"
 #include "config.h"
 #include "registry.h"
-#include "mdns_browser.h"
+#include "espnow_control.h"
 #include "ble_provisioner.h"
 #include "web_api.h"
 
@@ -21,8 +21,8 @@ void setup() {
   Serial.printf("\n[controller] WiFi up, ip=%s\n", WiFi.localIP().toString().c_str());
 
   registryInit();
-  mdnsBrowserInit();   // periodic _tealight._tcp browse + on-demand resolve
-  bleProvisionerInit(); // BLE central: discovery + one-at-a-time provisioning
+  espnowControlInit();  // ESP-NOW command transport + report/announce intake
+  bleProvisionerInit(); // BLE central: discovery + one-at-a-time naming
   webApiInit();         // REST API + web UI, async
 
   Serial.println("[controller] up");

@@ -2,40 +2,24 @@
 #include <AsyncJson.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
-#include <map>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <freertos/semphr.h>
 #include "web_api.h"
 #include "config.h"
 #include "registry.h"
-#include "device_proxy.h"
+#include "espnow_control.h"
+#include "espnow_proto.h"
+#include "modes.h"
 #include "ble_provisioner.h"
 
 static AsyncWebServer server(CONTROLLER_PORT);
 
-// ---- Background device-state poller ----
-// GET /api/devices serves this cache rather than proxying live on every
-// call, so the browser's ~2s UI refresh never fans out N device requests.
-struct CachedState {
-  bool   valid = false;
-  String json; // raw /api/state body, forwarded as-is
-};
-static std::map<String, CachedState> gStateCache;
-static SemaphoreHandle_t             gCacheMutex;
-
-static void pollTask(void*) {
+// Periodically nudge the fleet to report, so the cache for awake/live devices
+// stays fresh. Sleeping devices simply announce when they next wake.
+static void queryTask(void*) {
   for (;;) {
-    for (auto& rec : registryGetAll()) {
-      ProxyResult r = deviceProxyRequest(rec.fingerprint, "GET", "/api/state");
-      xSemaphoreTake(gCacheMutex, portMAX_DELAY);
-      CachedState& cs = gStateCache[rec.fingerprint];
-      cs.valid        = r.ok;
-      if (r.ok) cs.json = r.body;
-      xSemaphoreGive(gCacheMutex);
-      vTaskDelay(pdMS_TO_TICKS(50)); // stagger requests instead of bursting the whole fleet at once
-    }
-    vTaskDelay(pdMS_TO_TICKS(DEVICE_POLL_INTERVAL_MS));
+    espnowBroadcastQuery();
+    vTaskDelay(pdMS_TO_TICKS(DEVICE_QUERY_INTERVAL_MS));
   }
 }
 
@@ -45,68 +29,73 @@ static void sendJson(AsyncWebServerRequest* req, JsonDocument& doc) {
   req->send(res);
 }
 
-static void sendProxyResult(AsyncWebServerRequest* req, const ProxyResult& r) {
-  if (r.httpStatus == 404) {
-    req->send(404, "application/json", "{\"error\":\"unknown device\"}");
-  } else if (!r.ok) {
-    req->send(504, "application/json", "{\"error\":\"device unreachable\"}");
-  } else {
-    req->send(r.httpStatus, "application/json", r.body.length() ? r.body : "{}");
+// Build the TlFields + fieldMask from whatever subset the request supplied.
+static uint8_t fieldsFromJson(JsonVariant& json, TlFields& f) {
+  uint8_t mask = 0;
+  if (!json["mode"].isNull())       { f.mode       = json["mode"]       | 0; mask |= TL_F_MODE; }
+  else if (!json["modeName"].isNull()) {
+    String wanted = json["modeName"].as<const char*>();
+    for (int i = 0; i < TL_MODE_COUNT; i++) {
+      if (wanted.equalsIgnoreCase(tlModeName(i))) { f.mode = i; mask |= TL_F_MODE; break; }
+    }
   }
+  if (!json["hue"].isNull())        { f.hue        = json["hue"]        | 0; mask |= TL_F_HUE; }
+  if (!json["sat"].isNull())        { f.sat        = json["sat"]        | 0; mask |= TL_F_SAT; }
+  if (!json["speed"].isNull())      { f.speed      = json["speed"]      | 0; mask |= TL_F_SPEED; }
+  if (!json["intensity"].isNull())  { f.intensity  = json["intensity"]  | 0; mask |= TL_F_INTENSITY; }
+  if (!json["brightness"].isNull()) { f.brightness = json["brightness"] | 0; mask |= TL_F_BRIGHTNESS; }
+  return mask;
 }
-
-static const char* provisionStateToString(ProvisionState s) {
-  switch (s) {
-    case ProvisionState::IDLE:       return "idle";
-    case ProvisionState::SCANNING:   return "scanning";
-    case ProvisionState::CONNECTING: return "connecting";
-    case ProvisionState::WAITING:    return "waiting";
-    case ProvisionState::SUCCESS:    return "success";
-    case ProvisionState::FAILED:     return "failed";
-  }
-  return "idle";
-}
-
-// Latches so a polled /api/discovery/status doesn't re-write the registry
-// (and re-persist to flash) on every single poll once a run succeeds.
-static String gProvisionName;
-static bool   gProvisionRecorded = false;
 
 static void handleGetDevices(AsyncWebServerRequest* req) {
+  uint32_t now = millis();
   JsonDocument doc;
   JsonArray    arr = doc.to<JsonArray>();
   for (auto& rec : registryGetAll()) {
-    JsonObject o          = arr.add<JsonObject>();
-    o["fingerprint"]      = rec.fingerprint;
-    o["name"]             = rec.name;
-    o["ip"]               = rec.lastIp;
-    o["lastSeenMs"]       = rec.lastSeenMs;
-    o["provisionedAtMs"]  = rec.provisionedAtMs;
-    o["reachable"]        = rec.reachable;
+    JsonObject o         = arr.add<JsonObject>();
+    o["fingerprint"]     = rec.fingerprint;
+    o["name"]            = rec.name;
+    o["mac"]             = rec.macStr;
+    o["lastSeenMs"]      = rec.lastSeenMs;
+    o["provisionedAtMs"] = rec.provisionedAtMs;
+    o["reachable"]       = rec.haveMac && (now - rec.lastSeenMs) < DEVICE_OFFLINE_MS;
 
-    xSemaphoreTake(gCacheMutex, portMAX_DELAY);
-    auto it           = gStateCache.find(rec.fingerprint);
-    bool haveState    = it != gStateCache.end() && it->second.valid;
-    String stateJson  = haveState ? it->second.json : "";
-    xSemaphoreGive(gCacheMutex);
-
-    if (haveState) {
+    String stateJson;
+    if (espnowCachedStateJson(rec.fingerprint, stateJson)) {
       JsonDocument stateDoc;
-      if (!deserializeJson(stateDoc, stateJson)) {
-        o["state"] = stateDoc.as<JsonObject>();
-      }
+      if (!deserializeJson(stateDoc, stateJson)) o["state"] = stateDoc.as<JsonObject>();
     }
   }
   sendJson(req, doc);
 }
 
 static void handleGetDeviceModes(AsyncWebServerRequest* req) {
-  if (!req->hasParam("fp")) {
-    req->send(400, "application/json", "{\"error\":\"fp required\"}");
-    return;
+  JsonDocument doc;
+  JsonArray    arr = doc.to<JsonArray>();
+  for (int i = 0; i < TL_MODE_COUNT; i++) {
+    JsonObject o = arr.add<JsonObject>();
+    o["index"] = i;
+    o["name"]  = tlModeName(i);
   }
-  String fp = req->getParam("fp")->value();
-  sendProxyResult(req, deviceProxyRequest(fp, "GET", "/api/modes"));
+  sendJson(req, doc);
+}
+
+// Resolve "all" -> broadcast, or a fingerprint -> that device's MAC. Returns
+// false (and sends an error) if the fingerprint is unknown or never heard from.
+static bool resolveTarget(AsyncWebServerRequest* req, const String& fp, bool& broadcast, uint8_t macOut[6]) {
+  if (fp.equalsIgnoreCase("all")) { broadcast = true; return true; }
+  DeviceRecord rec;
+  if (!registryGet(fp, rec)) {
+    req->send(404, "application/json", "{\"error\":\"unknown device\"}");
+    return false;
+  }
+  if (!rec.haveMac) {
+    req->send(503, "application/json", "{\"error\":\"device not heard from yet\"}");
+    return false;
+  }
+  broadcast = false;
+  memcpy(macOut, rec.mac, 6);
+  return true;
 }
 
 static void handlePostDeviceState(AsyncWebServerRequest* req, JsonVariant& json) {
@@ -115,9 +104,17 @@ static void handlePostDeviceState(AsyncWebServerRequest* req, JsonVariant& json)
     req->send(400, "application/json", "{\"error\":\"fingerprint required\"}");
     return;
   }
-  String body;
-  serializeJson(json, body);
-  sendProxyResult(req, deviceProxyRequest(fp, "POST", "/api/state", body));
+  TlFields f;
+  uint8_t mask = fieldsFromJson(json, f);
+  if (mask == 0) {
+    req->send(400, "application/json", "{\"error\":\"no state fields\"}");
+    return;
+  }
+  bool broadcast; uint8_t mac[6];
+  if (!resolveTarget(req, fp, broadcast, mac)) return;
+  if (broadcast) espnowBroadcastState(mask, f);
+  else           espnowSendState(mac, mask, f);
+  req->send(200, "application/json", "{\"ok\":true}");
 }
 
 static void handlePostDeviceIdentify(AsyncWebServerRequest* req, JsonVariant& json) {
@@ -126,7 +123,11 @@ static void handlePostDeviceIdentify(AsyncWebServerRequest* req, JsonVariant& js
     req->send(400, "application/json", "{\"error\":\"fingerprint required\"}");
     return;
   }
-  sendProxyResult(req, deviceProxyRequest(fp, "POST", "/api/identify"));
+  bool broadcast; uint8_t mac[6];
+  if (!resolveTarget(req, fp, broadcast, mac)) return;
+  if (broadcast) espnowBroadcastIdentify();
+  else           espnowSendIdentify(mac);
+  req->send(200, "application/json", "{\"ok\":true}");
 }
 
 static void handlePostDeviceRename(AsyncWebServerRequest* req, JsonVariant& json) {
@@ -150,6 +151,23 @@ static void handlePostDeviceForget(AsyncWebServerRequest* req, JsonVariant& json
   req->send(200, "application/json", "{\"ok\":true}");
 }
 
+// ---- BLE naming wizard ----
+
+static const char* provisionStateToString(ProvisionState s) {
+  switch (s) {
+    case ProvisionState::IDLE:       return "idle";
+    case ProvisionState::SCANNING:   return "scanning";
+    case ProvisionState::CONNECTING: return "connecting";
+    case ProvisionState::WAITING:    return "waiting";
+    case ProvisionState::SUCCESS:    return "success";
+    case ProvisionState::FAILED:     return "failed";
+  }
+  return "idle";
+}
+
+static String gProvisionName;
+static bool   gProvisionRecorded = false;
+
 static void handlePostDiscoveryStart(AsyncWebServerRequest* req) {
   bleDiscoveryStart();
   req->send(200, "application/json", "{\"ok\":true}");
@@ -171,17 +189,15 @@ static void handleGetDiscoveryFound(AsyncWebServerRequest* req) {
 static void handlePostDiscoveryProvision(AsyncWebServerRequest* req, JsonVariant& json) {
   String  address  = json["address"] | "";
   uint8_t addrType = json["addrType"] | 0;
-  String  ssid     = json["ssid"] | "";
-  String  pass     = json["pass"] | "";
   String  name     = json["name"] | "";
-  if (address.length() == 0 || ssid.length() == 0) {
-    req->send(400, "application/json", "{\"error\":\"address and ssid required\"}");
+  if (address.length() == 0) {
+    req->send(400, "application/json", "{\"error\":\"address required\"}");
     return;
   }
   gProvisionName     = name;
   gProvisionRecorded = false;
-  if (!bleProvisionStart(address, addrType, ssid, pass, name)) {
-    req->send(409, "application/json", "{\"error\":\"a scan or provisioning run is already active\"}");
+  if (!bleProvisionStart(address, addrType, name)) {
+    req->send(409, "application/json", "{\"error\":\"a scan or naming run is already active\"}");
     return;
   }
   req->send(200, "application/json", "{\"ok\":true}");
@@ -189,27 +205,25 @@ static void handlePostDiscoveryProvision(AsyncWebServerRequest* req, JsonVariant
 
 static void handleGetDiscoveryStatus(AsyncWebServerRequest* req) {
   ProvisionState st = bleProvisionerState();
-  String         fp, ip, msg;
-  bleProvisionResult(fp, ip, msg);
+  String         fp, msg;
+  bleProvisionResult(fp, msg);
 
   if (st == ProvisionState::SUCCESS && !gProvisionRecorded && fp.length()) {
-    registryUpsertProvisioned(fp, gProvisionName.length() ? gProvisionName : fp, ip);
+    registryUpsertProvisioned(fp, gProvisionName.length() ? gProvisionName : fp);
     gProvisionRecorded = true;
   }
 
   JsonDocument doc;
   doc["state"]       = provisionStateToString(st);
   doc["fingerprint"] = fp;
-  doc["ip"]          = ip;
   doc["msg"]         = msg;
   sendJson(req, doc);
 }
 
 void webApiInit() {
-  LittleFS.begin(true); // format on first boot if the filesystem isn't there yet
+  LittleFS.begin(true);
 
-  gCacheMutex = xSemaphoreCreateMutex();
-  xTaskCreatePinnedToCore(pollTask, "device_poll", 6144, nullptr, 1, nullptr, 1);
+  xTaskCreatePinnedToCore(queryTask, "device_query", 4096, nullptr, 1, nullptr, 1);
 
   server.on("/api/devices", HTTP_GET, handleGetDevices);
   server.on("/api/device/modes", HTTP_GET, handleGetDeviceModes);
@@ -229,6 +243,5 @@ void webApiInit() {
   addJsonRoute("/api/discovery/provision", handlePostDiscoveryProvision);
 
   server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
-
   server.begin();
 }

@@ -180,3 +180,20 @@ body {
 }
 .spinner[hidden] { display: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* All-lights broadcast panel */
+.all-panel {
+  max-width: 1100px;
+  margin: 0 auto 18px;
+  padding: 16px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+.all-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.all-head h2 { margin: 0; font-size: 1.05rem; }

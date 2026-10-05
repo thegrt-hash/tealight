@@ -12,6 +12,23 @@
     <button id="addDeviceBtn" class="btn btn-primary">+ Add device</button>
   </header>
 
+  <section id="allPanel" class="all-panel">
+    <div class="all-head">
+      <h2>🎛 All lights</h2>
+      <button class="btn btn-small identify-all-btn">Locate all</button>
+    </div>
+    <div class="field">
+      <label>Effect</label>
+      <select class="all-mode-select"></select>
+    </div>
+    <div class="field"><label>Color</label><input type="range" class="all-hue-slider" min="0" max="255" step="1"></div>
+    <div class="field"><label>Saturation</label><input type="range" class="all-sat-slider" min="0" max="255" step="1"></div>
+    <div class="field"><label>Speed</label><input type="range" class="all-speed-slider" min="0" max="255" step="1"></div>
+    <div class="field"><label>Intensity</label><input type="range" class="all-intensity-slider" min="0" max="255" step="1"></div>
+    <div class="field"><label>Brightness</label><input type="range" class="all-brightness-slider" min="0" max="255" step="1"></div>
+    <p class="hint">Broadcasts to every tealight at once.</p>
+  </section>
+
   <main id="grid" class="grid">
     <p id="emptyState" class="empty-state" hidden>No tealights yet — click "+ Add device" to pair one over Bluetooth.</p>
   </main>
@@ -83,13 +100,11 @@
       </section>
 
       <section id="wizardForm" class="wizard-step" hidden>
-        <p class="hint">Pairing: <strong id="formDeviceName"></strong></p>
-        <label>WiFi network (SSID)<input id="formSsid" type="text" autocomplete="off"></label>
-        <label>WiFi password<input id="formPass" type="password" autocomplete="off"></label>
+        <p class="hint">Naming: <strong id="formDeviceName"></strong></p>
         <label>Friendly name<input id="formName" type="text" placeholder="e.g. Living Room"></label>
         <div class="modal-actions">
           <button id="formBack" class="btn">Back</button>
-          <button id="formSubmit" class="btn btn-primary">Connect</button>
+          <button id="formSubmit" class="btn btn-primary">Save name</button>
         </div>
       </section>
 

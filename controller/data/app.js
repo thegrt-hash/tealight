@@ -116,9 +116,9 @@ function renderDevice(dev) {
 
   card.querySelector('.device-name').textContent = dev.name || dev.fingerprint;
   card.querySelector('.status-dot').classList.toggle('online', !!dev.reachable);
-  card.querySelector('.meta-ip').textContent = dev.ip || '—';
+  card.querySelector('.meta-ip').textContent = dev.mac || '—';
   card.querySelector('.meta-fp').textContent = dev.fingerprint;
-  card.querySelector('.meta-lastseen').textContent = dev.reachable ? 'online now' : 'unreachable';
+  card.querySelector('.meta-lastseen').textContent = dev.reachable ? 'online now' : 'asleep / offline';
 
   if (document.activeElement !== card.querySelector('.rename-input')) {
     card.querySelector('.rename-input').value = dev.name || '';
@@ -228,10 +228,8 @@ async function startScan() {
 }
 
 async function submitProvision() {
-  const ssid = document.getElementById('formSsid').value.trim();
-  const pass = document.getElementById('formPass').value;
   const name = document.getElementById('formName').value.trim();
-  if (!ssid || !selectedDevice) return;
+  if (!selectedDevice) return;
 
   showStep(stepProgress);
   document.getElementById('progressSpinner').hidden = false;
@@ -242,7 +240,7 @@ async function submitProvision() {
   const start = await postJson('/api/discovery/provision', {
     address: selectedDevice.address,
     addrType: selectedDevice.addrType,
-    ssid, pass, name,
+    name,
   });
   if (!start.ok) {
     document.getElementById('progressStatus').textContent = start.data.error || 'Could not start provisioning.';
@@ -257,7 +255,7 @@ async function submitProvision() {
     if (!status) return;
     if (status.state === 'success') {
       clearInterval(progressPollHandle);
-      document.getElementById('progressStatus').textContent = `Connected! IP ${status.ip}`;
+      document.getElementById('progressStatus').textContent = 'Named! The light will join the fleet on ESP-NOW.';
       document.getElementById('progressSpinner').hidden = true;
       document.getElementById('progressDone').hidden = false;
       refreshDevices();
@@ -269,6 +267,42 @@ async function submitProvision() {
     }
   }, 1000);
 }
+
+// ---------------- All-lights broadcast panel ----------------
+
+async function initAllPanel() {
+  const selectEl = document.querySelector('.all-mode-select');
+  try {
+    const modes = await getJson('/api/device/modes');
+    selectEl.innerHTML = '';
+    for (const m of modes) {
+      const opt = document.createElement('option');
+      opt.value = m.index;
+      opt.textContent = m.name;
+      selectEl.appendChild(opt);
+    }
+  } catch (_) { /* leave empty; retry on next load */ }
+
+  selectEl.addEventListener('change', (e) => {
+    postJson('/api/device/state', { fingerprint: 'all', mode: Number(e.target.value) });
+  });
+
+  for (const cls of ['all-hue-slider', 'all-sat-slider', 'all-speed-slider', 'all-intensity-slider', 'all-brightness-slider']) {
+    const field = { 'all-hue-slider': 'hue', 'all-sat-slider': 'sat', 'all-speed-slider': 'speed', 'all-intensity-slider': 'intensity', 'all-brightness-slider': 'brightness' }[cls];
+    const el = document.querySelector('.' + cls);
+    el.addEventListener('input', () => {
+      clearTimeout(sliderTimers.get(el));
+      sliderTimers.set(el, setTimeout(() => {
+        postJson('/api/device/state', { fingerprint: 'all', [field]: Number(el.value) });
+      }, 150));
+    });
+  }
+
+  document.querySelector('.identify-all-btn').addEventListener('click', () => {
+    postJson('/api/device/identify', { fingerprint: 'all' });
+  });
+}
+initAllPanel();
 
 document.getElementById('addDeviceBtn').addEventListener('click', openWizard);
 document.getElementById('wizardClose').addEventListener('click', closeWizard);

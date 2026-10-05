@@ -19,46 +19,29 @@ static bool gWantScan      = false;
 static bool gWantProvision = false;
 struct PendingProvision {
   String  address;
-  uint8_t addrType;   // no default init: keeps this an aggregate for brace-init
-                      // below; the static gPending is zero-initialized anyway.
-  String  ssid, pass, name;
+  uint8_t addrType;
+  String  name;
 };
 static PendingProvision gPending;
 
-static String gResultFp, gResultIp, gResultMsg;
+static String gResultFp, gResultMsg;
 
-// Runs on NimBLE's own host task via the notify subscription — bridges the
-// device's StatusNotify payload into our state machine.
-static void onStatusNotify(NimBLERemoteCharacteristic* /*chr*/, uint8_t* data, size_t len, bool /*isNotify*/) {
-  JsonDocument doc;
-  if (deserializeJson(doc, (const char*)data, len)) return;
-  String status = doc["status"] | "";
-
+static void fail(const char* msg) {
   Lock lock;
-  if (status == "connected") {
-    gState    = ProvisionState::SUCCESS;
-    gResultFp = String((const char*)(doc["fingerprint"] | ""));
-    gResultIp = String((const char*)(doc["ip"] | ""));
-    gResultMsg = "";
-  } else if (status == "failed") {
-    gState     = ProvisionState::FAILED;
-    gResultMsg = "device reported a WiFi connect failure";
-  }
-  // "idle"/"connecting" — keep waiting.
+  gState     = ProvisionState::FAILED;
+  gResultMsg = msg;
 }
 
 static void provisionOne(const PendingProvision& req) {
-  { Lock lock; gState = ProvisionState::CONNECTING; gResultFp = ""; gResultIp = ""; gResultMsg = ""; }
+  { Lock lock; gState = ProvisionState::CONNECTING; gResultFp = ""; gResultMsg = ""; }
 
   NimBLEAddress addr(std::string(req.address.c_str()), req.addrType);
-  NimBLEClient*  client = NimBLEDevice::createClient();
+  NimBLEClient* client = NimBLEDevice::createClient();
   client->setConnectTimeout(8000);
 
   if (!client->connect(addr)) {
     NimBLEDevice::deleteClient(client);
-    Lock lock;
-    gState     = ProvisionState::FAILED;
-    gResultMsg = "BLE connect failed";
+    fail("BLE connect failed");
     return;
   }
 
@@ -66,73 +49,56 @@ static void provisionOne(const PendingProvision& req) {
   if (!svc) {
     client->disconnect();
     NimBLEDevice::deleteClient(client);
-    Lock lock;
-    gState     = ProvisionState::FAILED;
-    gResultMsg = "tealight service not found";
+    fail("tealight service not found");
     return;
   }
 
-  // Read the authoritative fingerprint/name before writing credentials.
+  // Read the authoritative fingerprint before naming.
+  String fingerprint, infoName;
   NimBLERemoteCharacteristic* infoChr = svc->getCharacteristic(BLE_CHR_INFO_UUID);
-  String infoName;
   if (infoChr && infoChr->canRead()) {
     JsonDocument doc;
     if (!deserializeJson(doc, infoChr->readValue().c_str())) {
-      infoName = String((const char*)(doc["name"] | ""));
+      fingerprint = String((const char*)(doc["fingerprint"] | ""));
+      infoName    = String((const char*)(doc["name"] | ""));
     }
   }
-
-  NimBLERemoteCharacteristic* statusChr = svc->getCharacteristic(BLE_CHR_STATUS_UUID);
-  NimBLERemoteCharacteristic* credsChr  = svc->getCharacteristic(BLE_CHR_CREDS_UUID);
-  if (!statusChr || !credsChr || !statusChr->canNotify() || !credsChr->canWrite()) {
+  if (fingerprint.length() == 0) {
     client->disconnect();
     NimBLEDevice::deleteClient(client);
-    Lock lock;
-    gState     = ProvisionState::FAILED;
-    gResultMsg = "tealight characteristics missing";
+    fail("could not read device fingerprint");
     return;
   }
 
-  statusChr->subscribe(true, onStatusNotify);
-
-  JsonDocument credsDoc;
-  credsDoc["ssid"] = req.ssid;
-  credsDoc["pass"] = req.pass;
-  credsDoc["name"] = req.name.length() ? req.name : infoName;
-  String credsOut;
-  serializeJson(credsDoc, credsOut);
+  NimBLERemoteCharacteristic* nameChr = svc->getCharacteristic(BLE_CHR_CREDS_UUID);
+  if (!nameChr || !nameChr->canWrite()) {
+    client->disconnect();
+    NimBLEDevice::deleteClient(client);
+    fail("tealight name characteristic missing");
+    return;
+  }
 
   { Lock lock; gState = ProvisionState::WAITING; }
 
-  if (!credsChr->writeValue(credsOut.c_str(), credsOut.length(), true)) {
+  JsonDocument nameDoc;
+  nameDoc["name"] = req.name.length() ? req.name : infoName;
+  String nameOut;
+  serializeJson(nameDoc, nameOut);
+
+  if (!nameChr->writeValue(nameOut.c_str(), nameOut.length(), true)) {
     client->disconnect();
     NimBLEDevice::deleteClient(client);
-    Lock lock;
-    gState     = ProvisionState::FAILED;
-    gResultMsg = "failed to write WiFi credentials";
+    fail("failed to write device name");
     return;
-  }
-
-  // onStatusNotify (fired from NimBLE's host task) will flip gState to
-  // SUCCESS/FAILED directly; we just wait for that or time out.
-  uint32_t start = millis();
-  while (millis() - start < BLE_PROVISION_TIMEOUT_MS) {
-    {
-      Lock lock;
-      if (gState == ProvisionState::SUCCESS || gState == ProvisionState::FAILED) break;
-    }
-    delay(100);
-  }
-  {
-    Lock lock;
-    if (gState == ProvisionState::WAITING) {
-      gState     = ProvisionState::FAILED;
-      gResultMsg = "timed out waiting for the device to join WiFi";
-    }
   }
 
   client->disconnect();
   NimBLEDevice::deleteClient(client);
+
+  Lock lock;
+  gState    = ProvisionState::SUCCESS;
+  gResultFp = fingerprint;
+  gResultMsg = "";
 }
 
 static void bleTask(void*) {
@@ -152,10 +118,7 @@ static void bleTask(void*) {
     }
 
     if (doScan) {
-      {
-        Lock lock;
-        gState = ProvisionState::SCANNING;
-      }
+      { Lock lock; gState = ProvisionState::SCANNING; }
       NimBLEDevice::getScan()->setActiveScan(true);
       NimBLEScanResults results = NimBLEDevice::getScan()->getResults(BLE_SCAN_MS, false);
 
@@ -188,9 +151,6 @@ void bleProvisionerInit() {
   xTaskCreatePinnedToCore(bleTask, "ble_provisioner", 6144, nullptr, 1, nullptr, 0);
 }
 
-// SUCCESS/FAILED are terminal-but-idle: a finished provisioning run (read
-// via bleProvisionResult()) shouldn't permanently block the next command,
-// only an operation still actually in flight should.
 static bool isBusyLocked() {
   return gState == ProvisionState::SCANNING || gState == ProvisionState::CONNECTING ||
          gState == ProvisionState::WAITING;
@@ -209,10 +169,10 @@ std::vector<FoundDevice> bleDiscoveryFound() {
   return gFound;
 }
 
-bool bleProvisionStart(const String& address, uint8_t addrType, const String& ssid, const String& pass, const String& name) {
+bool bleProvisionStart(const String& address, uint8_t addrType, const String& name) {
   Lock lock;
   if (isBusyLocked()) return false;
-  gPending       = PendingProvision{address, addrType, ssid, pass, name};
+  gPending       = PendingProvision{address, addrType, name};
   gWantProvision = true;
   return true;
 }
@@ -222,9 +182,8 @@ ProvisionState bleProvisionerState() {
   return gState;
 }
 
-void bleProvisionResult(String& fingerprint, String& ip, String& msg) {
+void bleProvisionResult(String& fingerprint, String& msg) {
   Lock lock;
   fingerprint = gResultFp;
-  ip          = gResultIp;
   msg         = gResultMsg;
 }

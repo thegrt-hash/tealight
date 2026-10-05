@@ -2,34 +2,31 @@
 #include <Arduino.h>
 #include <vector>
 
-// What the controller remembers about one tealight, independent of its
-// current IP. `fingerprint` (the device's efuse-MAC-derived id) is the only
-// stable key — `lastIp` is a cache, refreshed by the mDNS browser and by
-// on-demand resolves from the device proxy.
+// What the controller remembers about one tealight. `fingerprint` (the device's
+// efuse-MAC-derived id) is the stable key; `mac` is its ESP-NOW address, learned
+// from the device's own reports/announces (not known at BLE-naming time).
 struct DeviceRecord {
   String   fingerprint;
   String   name;
-  String   lastIp;
-  uint32_t lastSeenMs       = 0;
-  uint32_t provisionedAtMs  = 0;
-  bool     reachable        = false;
+  String   macStr;                 // "aa:bb:cc:dd:ee:ff", "" until first heard
+  uint8_t  mac[6]              = {0};
+  bool     haveMac            = false;
+  uint32_t lastSeenMs         = 0;  // millis() of last ESP-NOW message
+  uint32_t provisionedAtMs    = 0;
 };
 
-void registryInit(); // loads /registry.json from LittleFS (creates none if absent)
+void registryInit(); // loads /registry.json from LittleFS
 
 std::vector<DeviceRecord> registryGetAll();
 bool                      registryGet(const String& fingerprint, DeviceRecord& out);
 
-// Called by the mDNS browser (every browse cycle) and the device proxy
-// (after an on-demand re-resolve). Creates a new record on first sight
-// (persisted immediately); otherwise only refreshes the in-memory
-// lastIp/lastSeenMs/reachable — not persisted every time, to avoid wearing
-// the flash with a write every ~15s per device for the life of the fleet.
-void registryNoteSeen(const String& fingerprint, const String& ip, const String& defaultName);
+// Called from the ESP-NOW recv path on every report/announce. Creates a record
+// on first sight (persisted); otherwise refreshes mac/lastSeen in memory and
+// persists only when the MAC first becomes known (so we don't wear the flash).
+void registryNoteSeen(const String& fingerprint, const uint8_t mac[6], const String& defaultName);
 
-// Called right after a successful BLE provisioning pass. Always persisted.
-void registryUpsertProvisioned(const String& fingerprint, const String& name, const String& ip);
+// Called right after a successful BLE naming pass (MAC still unknown here).
+void registryUpsertProvisioned(const String& fingerprint, const String& name);
 
-void registryRename(const String& fingerprint, const String& name);        // persisted
-void registryMarkUnreachable(const String& fingerprint);                   // in-memory only
-void registryForget(const String& fingerprint);                            // persisted
+void registryRename(const String& fingerprint, const String& name); // persisted
+void registryForget(const String& fingerprint);                     // persisted
